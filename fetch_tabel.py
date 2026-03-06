@@ -2,7 +2,6 @@ import json
 import subprocess
 import sys
 
-# Install playwright
 subprocess.run([sys.executable, "-m", "pip", "install", "playwright"], check=True)
 subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
 
@@ -14,8 +13,21 @@ def scrape_all_tables():
     all_tables = []
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        )
+        
+        # Pakai user agent browser biasa supaya tidak diblokir
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
+        page = context.new_page()
         
         page_num = 1
         while True:
@@ -23,34 +35,43 @@ def scrape_all_tables():
             print(f"Scraping halaman {page_num}: {url}")
             
             try:
-                page.goto(url, timeout=30000, wait_until="networkidle")
-                page.wait_for_timeout(2000)
+                # Ganti networkidle ke domcontentloaded, lebih cepat
+                page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                # Tunggu konten JS selesai render
+                page.wait_for_timeout(5000)
             except Exception as e:
                 print(f"  Gagal load halaman: {e}")
                 break
             
-            # Ambil semua link tabel
-            links = page.query_selector_all("a[href*='/statistics-table/']")
+            # Debug: print title halaman
+            print(f"  Title: {page.title()}")
+            
+            # Coba berbagai selector yang mungkin dipakai BPS
+            links = (
+                page.query_selector_all("a[href*='/statistics-table/1/']") +
+                page.query_selector_all("a[href*='/statistics-table/2/']") +
+                page.query_selector_all("a[href*='/statistics-table/3/']")
+            )
+            
+            print(f"  Link tabel ditemukan: {len(links)}")
             
             if not links:
-                print(f"  Tidak ada tabel di halaman {page_num}, selesai.")
+                # Debug: print semua link yang ada di halaman
+                all_links = page.query_selector_all("a[href]")
+                print(f"  Total link di halaman: {len(all_links)}")
+                for l in all_links[:10]:
+                    print(f"    - {l.get_attribute('href')}")
                 break
             
-            new_count = 0
             existing_urls = {t["url"] for t in all_tables}
+            new_count = 0
             
             for link in links:
                 href = link.get_attribute("href") or ""
                 title = link.inner_text().strip()
                 
-                # Filter hanya link tabel yang valid (bukan menu navigasi)
-                if (
-                    "/statistics-table/1/" in href or
-                    "/statistics-table/2/" in href or
-                    "/statistics-table/3/" in href
-                ) and title and len(title) > 5:
+                if title and len(title) > 5:
                     full_url = href if href.startswith("http") else BASE_URL + href
-                    
                     if full_url not in existing_urls:
                         existing_urls.add(full_url)
                         all_tables.append({
@@ -62,17 +83,14 @@ def scrape_all_tables():
                         })
                         new_count += 1
             
-            print(f"  Dapat {new_count} tabel baru (total: {len(all_tables)})")
+            print(f"  {new_count} tabel baru (total: {len(all_tables)})")
             
-            # Cek apakah ada tombol next page
-            next_btn = page.query_selector("a[rel='next'], .pagination .next:not(.disabled) a, li.next:not(.disabled) a")
+            next_btn = page.query_selector("a[rel='next'], li.next:not(.disabled) a")
             if not next_btn:
-                print("  Tidak ada halaman berikutnya, selesai.")
+                print("  Tidak ada halaman berikutnya.")
                 break
             
             page_num += 1
-            
-            # Safety limit
             if page_num > 50:
                 break
         
